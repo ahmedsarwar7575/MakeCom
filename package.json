@@ -2,7 +2,9 @@
   "dependencies": {
     "express": "^5.1.0",
     "puppeteer": "^24.15.0",
-    "@sparticuz/chromium": "^121.0.0"
+    "@sparticuz/chromium": "^121.0.0",
+    "cheerio": "^1.0.0-rc.12"
+
   },
   "name": "make",
   "version": "1.0.0",
