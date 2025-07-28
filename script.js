@@ -10,7 +10,10 @@ app.post('/scrape', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'Missing URL' });
 
   try {
-    const browser = await puppeteer.launch({ headless: "new" });
+    const browser = await puppeteer.launch({
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
     const page = await browser.newPage();
 
     await page.goto(url, { waitUntil: 'networkidle0' });
