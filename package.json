@@ -1,15 +1,15 @@
 {
   "dependencies": {
     "express": "^5.1.0",
-    "puppeteer": "^24.15.0"
+    "puppeteer": "^24.15.0",
+    "@sparticuz/chromium": "^121.0.0"
   },
   "name": "make",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
-    "postinstall": "echo 'No extra Chrome needed'"
+    "postinstall": "node postinstall.js"
   },
   "keywords": [],
   "author": "",

@@ -1,6 +1,6 @@
-// server.js
 const express = require('express');
 const puppeteer = require('puppeteer');
+const chromium = require('@sparticuz/chromium');
 
 const app = express();
 app.use(express.json());
@@ -11,21 +11,23 @@ app.post('/scrape', async (req, res) => {
 
   try {
     const browser = await puppeteer.launch({
-      headless: 'new' 
+      args: chromium.args,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
     });
+
     const page = await browser.newPage();
-
-    await page.goto(url, { waitUntil: 'networkidle0' });
+    await page.goto(url, { waitUntil: 'networkidle2' });
     const html = await page.content();
-
     await browser.close();
 
-    res.send(html); // Send full HTML back
+    res.send(html);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
-app.get('/health', (req, res) => res.sendStatus(200));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
