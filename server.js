@@ -11,9 +11,8 @@ app.post('/scrape', async (req, res) => {
 
   try {
     const browser = await puppeteer.launch({
-        headless: 'new',
-        executablePath: puppeteer.executablePath(),
-      });
+      headless: 'new' 
+    });
     const page = await browser.newPage();
 
     await page.goto(url, { waitUntil: 'networkidle0' });
