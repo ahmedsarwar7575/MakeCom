@@ -1,25 +1,28 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const chromium = require('@sparticuz/chromium');
+const { setTimeout } = require('timers/promises');
 
 const app = express();
 app.use(express.json());
 
-// Browser instance management
+// Browser management with request queue
 let browserInstance = null;
-let isBrowserAvailable = true;
+const requestQueue = [];
+let isProcessing = false;
+const TIMEOUT_MS = 180000; // 3 minutes
 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.send('OK');
 });
 
-// Browser launch with retries and error handling
+// Browser launch with robust error handling
 const launchBrowser = async () => {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       console.log(`Launching browser attempt #${attempt}`);
-      const browser = await puppeteer.launch({
+      return await puppeteer.launch({
         args: [
           ...chromium.args,
           '--disable-gpu',
@@ -33,97 +36,58 @@ const launchBrowser = async () => {
         executablePath: await chromium.executablePath(),
         headless: 'new',
         ignoreHTTPSErrors: true,
-        timeout: 180000 // 3 minutes
+        timeout: TIMEOUT_MS
       });
-      console.log('✅ Browser launched successfully');
-      return browser;
     } catch (error) {
       console.error(`Browser launch attempt ${attempt} failed:`, error);
       if (attempt === 3) throw error;
-      await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retrying
+      await setTimeout(5000); // Wait 5 seconds before retrying
     }
   }
 };
 
-// Get browser instance with locking mechanism
-const getBrowser = async () => {
-  while (!isBrowserAvailable) {
-    console.log('Browser in use, waiting...');
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
+// Process requests from queue
+const processQueue = async () => {
+  if (isProcessing || requestQueue.length === 0) return;
   
-  isBrowserAvailable = false;
+  isProcessing = true;
+  const { req, res } = requestQueue.shift();
   
   try {
-    if (!browserInstance || !browserInstance.isConnected()) {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'Missing URL' });
+
+    let browser = browserInstance;
+    if (!browser || !browser.isConnected()) {
       browserInstance = await launchBrowser();
+      browser = browserInstance;
+      console.log('✅ Browser launched successfully');
     }
-    return browserInstance;
-  } finally {
-    isBrowserAvailable = true;
-  }
-};
 
-// Helper function to scroll the page
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let totalHeight = 0;
-      const distance = 100;
-      const timer = setInterval(() => {
-        const scrollHeight = document.body.scrollHeight;
-        window.scrollBy(0, distance);
-        totalHeight += distance;
-
-        if (totalHeight >= scrollHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 100);
-    });
-  });
-}
-
-// Scraping endpoint with enhanced content extraction
-app.post('/scrape', async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'Missing URL' });
-
-  let browser, page;
-  try {
-    browser = await getBrowser();
-    page = await browser.newPage();
+    const page = await browser.newPage();
+    await page.setDefaultNavigationTimeout(TIMEOUT_MS);
+    await page.setDefaultTimeout(TIMEOUT_MS);
     
-    // Set user agent to mimic a real browser
+    // Set user agent to avoid bot detection
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-    
-    // Set timeouts to 3 minutes
-    await page.setDefaultNavigationTimeout(180000);
-    await page.setDefaultTimeout(180000);
     
     console.log(`Navigating to: ${url}`);
     await page.goto(url, {
       waitUntil: 'domcontentloaded',
-      timeout: 180000
+      timeout: TIMEOUT_MS
     });
     
-    // Wait for the main content container
-    await page.waitForSelector('article', { timeout: 180000 });
+    // Wait for main content to appear
+    await page.waitForSelector('body', { timeout: TIMEOUT_MS });
     
-    // Scroll to trigger lazy-loaded content
-    await autoScroll(page);
-    
-    // Add a small delay to ensure all content is rendered
-    await page.waitForTimeout(3000);
-    
-    // Extract and clean main content
+    // Extract main content
     const mainContentHtml = await page.evaluate(() => {
       try {
         // Find main content container
-        const mainElement = document.querySelector('article') || 
-                            document.querySelector('main') || 
+        const mainElement = document.querySelector('main') || 
                             document.querySelector('.main-content') || 
                             document.querySelector('#content') || 
+                            document.querySelector('article') || 
                             document.body;
         
         // Clone to avoid modifying original DOM
@@ -134,15 +98,14 @@ app.post('/scrape', async (req, res) => {
           'header', 'nav', 'footer', '.header', '.navbar', 
           '.footer', '.nav', '.ads', 'script', 'style', 
           'noscript', 'link', 'iframe', 'svg', 'img',
-          'aside', '.sidebar', '.ad-container', '.site-header',
-          '.site-footer', '.cookie-banner', '.newsletter'
+          'aside', '.sidebar', '.ad-container'
         ];
         
         selectorsToRemove.forEach(selector => {
           cleanElement.querySelectorAll(selector).forEach(el => el.remove());
         });
         
-        return cleanElement.outerHTML;
+        return cleanElement.innerHTML;
       } catch (error) {
         console.error('DOM processing error:', error);
         return document.documentElement.outerHTML;
@@ -150,13 +113,28 @@ app.post('/scrape', async (req, res) => {
     });
     
     res.send(mainContentHtml);
-  } catch (err) {
-    console.error('Scraping error:', err);
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error('Scraping error:', error);
+    res.status(500).json({ error: error.message });
   } finally {
+    // Always close the page
     if (page && !page.isClosed()) {
       await page.close().catch(e => console.error('Error closing page:', e));
     }
+    
+    isProcessing = false;
+    processQueue(); // Process next request
+  }
+};
+
+// Request queue handling
+app.post('/scrape', (req, res) => {
+  // Add request to queue
+  requestQueue.push({ req, res });
+  
+  // Process queue if not already processing
+  if (!isProcessing) {
+    processQueue();
   }
 });
 
