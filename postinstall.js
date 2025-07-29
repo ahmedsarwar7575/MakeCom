@@ -1,4 +1,3 @@
-// postinstall.js
 const chromium = require("@sparticuz/chromium");
 
 async function main() {
