@@ -1,89 +1,137 @@
 const express = require('express');
 const puppeteer = require('puppeteer');
 const chromium = require('@sparticuz/chromium');
-const cheerio = require('cheerio'); // For HTML parsing
+const { setTimeout } = require('timers/promises');
 
 const app = express();
 app.use(express.json());
+
+// Browser management variables
+let browserInstance = null;
+let browserInUse = false;
+const BROWSER_LAUNCH_DELAY = 5000; // 5 seconds delay between launches
 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.send('OK');
 });
 
-// Global browser instance
-let browser;
-
-const launchBrowser = async () => {
-  console.log('Launching browser...');
-  return puppeteer.launch({
-    args: [...chromium.args, '--disable-gpu', '--no-sandbox', '--single-process', '--disable-dev-shm-usage'],
-    executablePath: await chromium.executablePath(),
-    headless: chromium.headless,
-    ignoreHTTPSErrors: true,
-    timeout: 180000, // 3 minutes
-  });
+// Function to safely launch browser with retries
+const safeLaunchBrowser = async () => {
+  const maxRetries = 3;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`Launching browser attempt ${attempt}...`);
+      const browser = await puppeteer.launch({
+        args: [
+          ...chromium.args,
+          '--disable-gpu',
+          '--no-sandbox',
+          '--single-process',
+          '--disable-dev-shm-usage',
+          '--disable-setuid-sandbox',
+          '--no-zygote'
+        ],
+        executablePath: await chromium.executablePath(),
+        headless: 'new',
+        ignoreHTTPSErrors: true,
+        timeout: 180000 // 3 minutes
+      });
+      
+      console.log('✅ Browser launched successfully');
+      return browser;
+    } catch (err) {
+      console.error(`❌ Browser launch attempt ${attempt} failed:`, err);
+      
+      if (attempt < maxRetries) {
+        console.log(`Waiting ${BROWSER_LAUNCH_DELAY}ms before retry...`);
+        await setTimeout(BROWSER_LAUNCH_DELAY);
+      } else {
+        throw err;
+      }
+    }
+  }
 };
 
-// Launch browser on server start
-(async () => {
-  try {
-    browser = await launchBrowser();
-    console.log('✅ Browser launched successfully');
-  } catch (err) {
-    console.error('❌ Browser launch failed:', err);
+// Get browser instance with locking mechanism
+const getBrowser = async () => {
+  while (browserInUse) {
+    console.log('Browser in use, waiting...');
+    await setTimeout(1000);
   }
-})();
+  
+  browserInUse = true;
+  
+  try {
+    if (!browserInstance || !browserInstance.isConnected()) {
+      browserInstance = await safeLaunchBrowser();
+    }
+    return browserInstance;
+  } finally {
+    browserInUse = false;
+  }
+};
 
 app.post('/scrape', async (req, res) => {
-  const { url, mainContentSelector = 'main, .main, #main, .content' } = req.body;
+  const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'Missing URL' });
 
-  let page;
+  let browser, page;
   try {
-    if (!browser || !browser.isConnected()) {
-      console.log('Re-launching browser...');
-      browser = await launchBrowser();
-    }
-
+    browser = await getBrowser();
     page = await browser.newPage();
-    await page.setDefaultNavigationTimeout(180000); // 3 minutes
-    await page.setDefaultTimeout(180000); // 3 minutes
-
+    
+    // Set timeouts to 3 minutes
+    await page.setDefaultNavigationTimeout(180000);
+    await page.setDefaultTimeout(180000);
+    
     console.log(`Navigating to: ${url}`);
     await page.goto(url, {
       waitUntil: 'networkidle2',
       timeout: 180000
     });
-
-    // Wait for main content to be present
+    
+    // Wait for main content to load
     console.log('Waiting for main content...');
-    await page.waitForSelector(mainContentSelector, {
-      timeout: 180000
-    });
-
-    // Execute JavaScript in browser context to extract only main content
-    const mainContentHtml = await page.evaluate((selector) => {
+    await page.waitForFunction(() => {
+      const mainContent = document.querySelector('main') || 
+                          document.querySelector('.main-content') || 
+                          document.querySelector('#content') || 
+                          document.body;
+      return mainContent.innerText.trim() !== '';
+    }, { timeout: 180000 });
+    
+    // Extract and clean main content
+    const mainContentHtml = await page.evaluate(() => {
       try {
-        // Get main content element
-        const mainElement = document.querySelector(selector) || document.body;
+        // Find main content container
+        const mainElement = document.querySelector('main') || 
+                            document.querySelector('.main-content') || 
+                            document.querySelector('#content') || 
+                            document.body;
+        
+        // Clone to avoid modifying original DOM
+        const cleanElement = mainElement.cloneNode(true);
         
         // Remove unwanted elements
-        const elementsToRemove = [
-          ...mainElement.querySelectorAll('header, nav, footer, .header, .navbar, .footer, .nav, .ads'),
-          ...document.querySelectorAll('script, style, noscript, link')
+        const selectorsToRemove = [
+          'header', 'nav', 'footer', '.header', '.navbar', 
+          '.footer', '.nav', '.ads', 'script', 'style', 
+          'noscript', 'link', 'iframe', 'svg', 'img'
         ];
         
-        elementsToRemove.forEach(el => el.remove());
+        selectorsToRemove.forEach(selector => {
+          cleanElement.querySelectorAll(selector).forEach(el => el.remove());
+        });
         
-        // Return clean HTML
-        return mainElement.innerHTML;
+        return cleanElement.innerHTML;
       } catch (error) {
         console.error('DOM processing error:', error);
         return document.documentElement.outerHTML;
       }
-    }, mainContentSelector);
-
+    });
+    
     res.send(mainContentHtml);
   } catch (err) {
     console.error('Scraping error:', err);
@@ -93,15 +141,17 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  if (browser) await browser.close();
-  process.exit(0);
-});
-process.on('SIGTERM', async () => {
-  if (browser) await browser.close();
-  process.exit(0);
-});
+// Clean up browser on exit
+const cleanup = async () => {
+  if (browserInstance) {
+    console.log('Closing browser...');
+    await browserInstance.close().catch(err => console.error('Error closing browser:', err));
+    browserInstance = null;
+  }
+};
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
