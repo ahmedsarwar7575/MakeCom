@@ -128,15 +128,81 @@ const processQueue = async () => {
 };
 
 // Request queue handling
-app.post('/scrape', (req, res) => {
-  // Add request to queue
-  requestQueue.push({ req, res });
-  
-  // Process queue if not already processing
-  if (!isProcessing) {
-    processQueue();
+app.post('/scrape', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'Missing URL' });
+
+  let page;
+  try {
+    if (!browser || !browser.isConnected()) {
+      browser = await launchBrowser();
+    }
+
+    page = await browser.newPage();
+    
+    // Set user agent to mimic a real browser
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+    
+    // Set timeouts to 3 minutes
+    await page.setDefaultNavigationTimeout(180000);
+    await page.setDefaultTimeout(180000);
+    
+    console.log(`Navigating to: ${url}`);
+    await page.goto(url, {
+      waitUntil: 'networkidle2',  // Wait for network activity to finish
+      timeout: 180000
+    });
+    
+    // Wait for the main content container to be present
+    await page.waitForSelector('article', { timeout: 180000 });
+    
+    // Scroll to trigger lazy-loaded content
+    await autoScroll(page);
+    
+    // Add a small delay to ensure all content is rendered
+    await page.waitForTimeout(3000);
+    
+    // Extract the entire article content
+    const articleContent = await page.evaluate(() => {
+      try {
+        const article = document.querySelector('article');
+        if (!article) return document.documentElement.outerHTML;
+        
+        // Return the entire article content
+        return article.outerHTML;
+      } catch (error) {
+        return document.documentElement.outerHTML;
+      }
+    });
+    
+    res.send(articleContent);
+  } catch (err) {
+    console.error('Scraping error:', err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (page && !page.isClosed()) await page.close();
   }
 });
+
+// Add this helper function above your route
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    await new Promise((resolve) => {
+      let totalHeight = 0;
+      const distance = 100;
+      const timer = setInterval(() => {
+        const scrollHeight = document.body.scrollHeight;
+        window.scrollBy(0, distance);
+        totalHeight += distance;
+
+        if (totalHeight >= scrollHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 100);
+    });
+  });
+}
 
 // Clean up browser on exit
 const cleanup = async () => {
