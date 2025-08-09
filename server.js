@@ -52,7 +52,7 @@ const processQueue = async () => {
   
   isProcessing = true;
   const { req, res } = requestQueue.shift();
-  
+  let page;
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'Missing URL' });
@@ -64,7 +64,7 @@ const processQueue = async () => {
       console.log('✅ Browser launched successfully');
     }
 
-    const page = await browser.newPage();
+    page = await browser.newPage();
     await page.setDefaultNavigationTimeout(TIMEOUT_MS);
     await page.setDefaultTimeout(TIMEOUT_MS);
     
